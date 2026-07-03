@@ -39,7 +39,7 @@ app.include_router(ev.router)
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "stage": 1, "features": ["csv_upload", "ev_scan", "csv_export"]}
+    return {"status": "ok", "stage": 2, "features": ["csv_upload", "odds_api", "ev_scan", "csv_export"]}
 
 
 if FRONTEND_DIST.exists():

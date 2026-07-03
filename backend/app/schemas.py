@@ -81,6 +81,7 @@ class AppSettingsOut(BaseModel):
     default_flat_stake: float
     default_kelly_fraction: float
     odds_api_configured: bool
+    odds_api_regions: list[str] = []
 
 
 class ScanSummary(BaseModel):

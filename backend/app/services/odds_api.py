@@ -1,125 +1,108 @@
 """
-Stage 2: Odds API integration via The Odds API (licensed provider).
+Ingest The Odds API responses into the local SQLite database.
 
-Requires ODDS_API_KEY environment variable. Does not scrape sportsbook sites.
-https://the-odds-api.com/
+Uses odds_api_client (licensed provider). Does not scrape sportsbook sites.
 """
 
 from datetime import datetime
 
-import httpx
 from sqlalchemy.orm import Session
 
-from app.config import settings
 from app.models import Event, Odds
 from app.services.normalizer import (
     build_event_id,
-    normalize_market,
     normalize_selection,
     normalize_sportsbook,
     normalize_team,
 )
-from app.services.odds_utils import american_to_decimal, decimal_to_american
+from app.services.odds_api_client import (
+    OddsAPIClient,
+    OddsAPIError,
+    get_client,
+)
+from app.services.odds_utils import american_to_decimal
 
-# Map The Odds API bookmaker keys to Ontario display names
+# Map known API bookmaker keys to Ontario display names when available
 BOOKMAKER_MAP = {
     "fanduel": "FanDuel Ontario",
     "draftkings": "DraftKings Ontario",
     "betmgm": "BetMGM Ontario",
     "williamhill_us": "Caesars Ontario",
     "bet365": "Bet365 Ontario",
+    "bet365_us": "Bet365 Ontario",
+    "espnbet": "theScore Bet",
 }
-
-MARKET_MAP = {
-    "h2h": "moneyline",
-    "spreads": "spread",
-    "totals": "totals",
-}
-
-ONTARIO_REGION = "us"  # The Odds API uses region codes; Ontario books often under us/ca
-
-
-class OddsAPIError(Exception):
-    pass
 
 
 def is_configured() -> bool:
-    return bool(settings.odds_api_key)
+    return get_client().is_configured
 
 
-async def fetch_sports() -> list[dict]:
-    if not is_configured():
-        raise OddsAPIError("ODDS_API_KEY is not configured")
-
-    url = f"{settings.odds_api_base_url}/sports"
-    async with httpx.AsyncClient(timeout=30) as client:
-        response = await client.get(url, params={"apiKey": settings.odds_api_key})
-        response.raise_for_status()
-        return response.json()
+def fetch_sports(all_sports: bool = False) -> list[dict]:
+    return get_client().fetch_sports(all_sports=all_sports)
 
 
-async def fetch_odds(sport_key: str, markets: str = "h2h,spreads,totals") -> list[dict]:
-    if not is_configured():
-        raise OddsAPIError("ODDS_API_KEY is not configured")
-
-    url = f"{settings.odds_api_base_url}/sports/{sport_key}/odds"
-    params = {
-        "apiKey": settings.odds_api_key,
-        "regions": "us",
-        "markets": markets,
-        "oddsFormat": "american",
-    }
-    async with httpx.AsyncClient(timeout=30) as client:
-        response = await client.get(url, params=params)
-        response.raise_for_status()
-        return response.json()
-
-
-def _parse_api_event(event_data: dict) -> tuple[str, Event]:
-    sport = event_data.get("sport_title", event_data.get("sport_key", "unknown"))
-    league = event_data.get("sport_title", sport)
-    commence = datetime.fromisoformat(event_data["commence_time"].replace("Z", "+00:00"))
-    home_team = event_data["home_team"]
-    away_team = event_data["away_team"]
-    event_id = build_event_id(sport, league, commence.isoformat(), home_team, away_team)
-
-    return event_id, Event(
-        event_id=event_id,
-        sport=sport,
-        league=league,
-        start_time=commence.replace(tzinfo=None),
-        home_team=home_team,
-        away_team=away_team,
-        home_team_normalized=normalize_team(home_team),
-        away_team_normalized=normalize_team(away_team),
+def fetch_odds(
+    sport_key: str,
+    regions: str | list[str] = "us",
+    markets: str | list[str] = ("moneyline", "spread", "totals"),
+) -> dict:
+    return get_client().fetch_odds(
+        sport_key=sport_key,
+        regions=regions,
+        markets=markets,
+        odds_format="american",
     )
 
 
+def _resolve_sportsbook(book_key: str, book_title: str) -> str:
+    mapped = BOOKMAKER_MAP.get(book_key)
+    if mapped:
+        return mapped
+    return normalize_sportsbook(book_title) if book_title else book_key
+
+
 def ingest_api_odds(db: Session, api_data: list[dict]) -> dict[str, int]:
-    """Parse The Odds API response and upsert into database."""
+    """Parse The Odds API event list and upsert into database."""
     events_created = 0
     odds_created = 0
+    odds_updated = 0
     now = datetime.utcnow()
 
     for event_data in api_data:
-        event_id, event = _parse_api_event(event_data)
-        existing_event = db.query(Event).filter(Event.event_id == event_id).first()
-        if not existing_event:
-            db.add(event)
-            events_created += 1
-
+        sport = event_data.get("sport_title", event_data.get("sport_key", "unknown"))
+        league = event_data.get("sport_title", sport)
+        commence = datetime.fromisoformat(event_data["commence_time"].replace("Z", "+00:00"))
         home_team = event_data["home_team"]
         away_team = event_data["away_team"]
+        event_id = build_event_id(sport, league, commence.isoformat(), home_team, away_team)
+
+        existing_event = db.query(Event).filter(Event.event_id == event_id).first()
+        if not existing_event:
+            db.add(
+                Event(
+                    event_id=event_id,
+                    sport=sport,
+                    league=league,
+                    start_time=commence.replace(tzinfo=None),
+                    home_team=home_team,
+                    away_team=away_team,
+                    home_team_normalized=normalize_team(home_team),
+                    away_team_normalized=normalize_team(away_team),
+                )
+            )
+            events_created += 1
 
         for bookmaker in event_data.get("bookmakers", []):
             book_key = bookmaker.get("key", "")
-            sportsbook = BOOKMAKER_MAP.get(book_key)
-            if not sportsbook:
-                continue
+            book_title = bookmaker.get("title", book_key)
+            sportsbook = _resolve_sportsbook(book_key, book_title)
 
             for market_data in bookmaker.get("markets", []):
                 market_key = market_data.get("key", "")
-                market = MARKET_MAP.get(market_key)
+                from app.services.odds_api_client import API_TO_MARKET
+
+                market = API_TO_MARKET.get(market_key)
                 if not market:
                     continue
 
@@ -129,14 +112,7 @@ def ingest_api_odds(db: Session, api_data: list[dict]) -> dict[str, int]:
                     point = outcome.get("point")
                     line = float(point) if point is not None else None
 
-                    if market == "totals":
-                        selection = name
-                    elif market == "spread":
-                        selection = name
-                    else:
-                        selection = name
-
-                    selection_norm = normalize_selection(selection, market, home_team, away_team)
+                    selection_norm = normalize_selection(name, market, home_team, away_team)
                     decimal_odds = american_to_decimal(price)
 
                     existing = (
@@ -152,16 +128,18 @@ def ingest_api_odds(db: Session, api_data: list[dict]) -> dict[str, int]:
                     )
 
                     if existing:
+                        existing.selection = name
                         existing.american_odds = price
                         existing.decimal_odds = decimal_odds
                         existing.timestamp = now
+                        odds_updated += 1
                     else:
                         db.add(
                             Odds(
                                 event_id=event_id,
                                 sportsbook=sportsbook,
                                 market=market,
-                                selection=selection,
+                                selection=name,
                                 selection_normalized=selection_norm,
                                 line=line,
                                 american_odds=price,
@@ -172,4 +150,17 @@ def ingest_api_odds(db: Session, api_data: list[dict]) -> dict[str, int]:
                         odds_created += 1
 
     db.commit()
-    return {"events_created": events_created, "odds_created": odds_created}
+    return {
+        "events_created": events_created,
+        "odds_created": odds_created,
+        "odds_updated": odds_updated,
+    }
+
+
+__all__ = [
+    "OddsAPIError",
+    "fetch_sports",
+    "fetch_odds",
+    "ingest_api_odds",
+    "is_configured",
+]

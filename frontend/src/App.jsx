@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useState } from 'react'
-import { exportEVUrl, fetchSettings, refreshOddsAPI, scanEV, uploadCSV } from './api'
+import {
+  exportEVUrl,
+  fetchOddsAPISports,
+  fetchOddsFromAPI,
+  fetchSettings,
+  previewOddsFromAPI,
+  scanEV,
+  uploadCSV,
+} from './api'
 
 function formatOdds(american) {
   return american > 0 ? `+${american}` : String(american)
@@ -31,6 +39,12 @@ const DEFAULT_FILTERS = {
   kelly_fraction: 0.25,
 }
 
+const MARKET_OPTIONS = [
+  { label: 'Moneyline', value: 'moneyline' },
+  { label: 'Spread', value: 'spread' },
+  { label: 'Totals', value: 'totals' },
+]
+
 export default function App() {
   const [settings, setSettings] = useState(null)
   const [filters, setFilters] = useState(DEFAULT_FILTERS)
@@ -39,6 +53,14 @@ export default function App() {
   const [loading, setLoading] = useState(false)
   const [message, setMessage] = useState(null)
   const [messageType, setMessageType] = useState('info')
+
+  // Odds API state
+  const [apiSports, setApiSports] = useState([])
+  const [selectedSport, setSelectedSport] = useState('')
+  const [selectedRegion, setSelectedRegion] = useState('us')
+  const [selectedMarkets, setSelectedMarkets] = useState(['moneyline', 'spread', 'totals'])
+  const [oddsRows, setOddsRows] = useState([])
+  const [lastFetch, setLastFetch] = useState(null)
 
   const showMessage = (text, type = 'info') => {
     setMessage(text)
@@ -57,6 +79,14 @@ export default function App() {
           kelly_fraction: s.default_kelly_fraction,
           stale_minutes: s.stale_odds_minutes,
         }))
+        if (s.odds_api_configured) {
+          fetchOddsAPISports()
+            .then((sports) => {
+              setApiSports(sports.filter((sp) => sp.active))
+              if (sports.length) setSelectedSport(sports[0].key)
+            })
+            .catch(() => {})
+        }
       })
       .catch(() => showMessage('Could not connect to backend. Is the server running?', 'error'))
   }, [])
@@ -119,13 +149,26 @@ export default function App() {
     window.open(exportEVUrl(buildScanParams()), '_blank')
   }
 
-  const handleApiRefresh = async () => {
+  const handleFetchOdds = async () => {
+    if (!selectedSport || !selectedMarkets.length) {
+      showMessage('Select a sport and at least one market.', 'error')
+      return
+    }
     setLoading(true)
     setMessage(null)
     try {
-      const result = await refreshOddsAPI('basketball_nba')
-      showMessage(`API refresh: ${result.odds_created} odds, ${result.events_created} events from ${result.events_in_response} API events`, 'success')
-      await handleScan()
+      const markets = selectedMarkets.join(',')
+      const [fetchResult, previewResult] = await Promise.all([
+        fetchOddsFromAPI({ sport_key: selectedSport, regions: selectedRegion, markets }),
+        previewOddsFromAPI({ sport_key: selectedSport, regions: selectedRegion, markets }),
+      ])
+      setOddsRows(previewResult.rows || [])
+      setLastFetch(previewResult.fetched_at)
+      const remaining = fetchResult.requests_remaining ? ` API requests remaining: ${fetchResult.requests_remaining}` : ''
+      showMessage(
+        `Fetched ${fetchResult.row_count} lines from ${fetchResult.event_count} events. Saved ${fetchResult.odds_created} new / ${fetchResult.odds_updated} updated.${remaining}`,
+        'success',
+      )
     } catch (err) {
       showMessage(err.message, 'error')
     } finally {
@@ -133,11 +176,19 @@ export default function App() {
     }
   }
 
+  const toggleMarket = (value) => {
+    setSelectedMarkets((prev) =>
+      prev.includes(value) ? prev.filter((m) => m !== value) : [...prev, value],
+    )
+  }
+
   const updateFilter = (key, value) => {
     setFilters((f) => ({ ...f, [key]: value }))
   }
 
   const sports = settings ? [...new Set(['NBA', 'NHL', 'NFL', 'MLB', 'NCAAB'])] : []
+  const apiConfigured = settings?.odds_api_configured
+  const regions = settings?.odds_api_regions || ['us', 'us2', 'uk', 'eu', 'au']
 
   return (
     <div className="app">
@@ -146,8 +197,104 @@ export default function App() {
           <h1>Ontario EV Betting Scanner</h1>
           <p>Compare odds across Ontario sportsbooks and find positive expected value bets</p>
         </div>
-        <span className="badge stage">Stage 1 — CSV Upload</span>
+        <span className="badge stage">{apiConfigured ? 'Stage 2 — Odds API' : 'Stage 1 — CSV Upload'}</span>
       </header>
+
+      {/* Odds API section */}
+      <section className="card" style={{ marginBottom: 20 }}>
+        <h2>Fetch Live Odds (The Odds API)</h2>
+        {!apiConfigured ? (
+          <div className="message info">
+            <strong>API key not configured.</strong> Add your key to <code>backend/.env</code>:
+            <pre style={{ marginTop: 8, fontSize: '0.85rem' }}>ODDS_API_KEY=your_api_key_here</pre>
+            Get a free key at <a href="https://the-odds-api.com/" target="_blank" rel="noreferrer" style={{ color: 'var(--accent)' }}>the-odds-api.com</a>
+          </div>
+        ) : (
+          <>
+            <div className="form-grid">
+              <label>
+                Sport
+                <select value={selectedSport} onChange={(e) => setSelectedSport(e.target.value)}>
+                  {apiSports.map((s) => (
+                    <option key={s.key} value={s.key}>{s.title}</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Region
+                <select value={selectedRegion} onChange={(e) => setSelectedRegion(e.target.value)}>
+                  {regions.map((r) => (
+                    <option key={r} value={r}>{r.toUpperCase()}</option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <div style={{ marginTop: 12 }}>
+              <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)', fontWeight: 500 }}>Markets</span>
+              <div className="checkbox-row" style={{ marginTop: 6, gap: 16 }}>
+                {MARKET_OPTIONS.map((m) => (
+                  <label key={m.value} style={{ flexDirection: 'row', color: 'var(--text)', cursor: 'pointer' }}>
+                    <input
+                      type="checkbox"
+                      checked={selectedMarkets.includes(m.value)}
+                      onChange={() => toggleMarket(m.value)}
+                    />
+                    {m.label}
+                  </label>
+                ))}
+              </div>
+            </div>
+            <div className="actions">
+              <button className="btn-primary" onClick={handleFetchOdds} disabled={loading}>
+                {loading ? 'Fetching…' : 'Fetch Odds'}
+              </button>
+              <button className="btn-secondary" onClick={handleScan} disabled={loading || !oddsRows.length}>
+                Calculate +EV Bets
+              </button>
+            </div>
+          </>
+        )}
+        {message && <div className={`message ${messageType}`} style={{ marginTop: 12 }}>{message}</div>}
+      </section>
+
+      {/* Odds table */}
+      {oddsRows.length > 0 && (
+        <section className="card" style={{ marginBottom: 20 }}>
+          <h2>Odds Table</h2>
+          {lastFetch && <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: 12 }}>Last fetched: {formatDate(lastFetch)}</p>}
+          <div className="table-wrap" style={{ maxHeight: 400, overflow: 'auto' }}>
+            <table>
+              <thead>
+                <tr>
+                  <th>Event</th>
+                  <th>Book</th>
+                  <th>Market</th>
+                  <th>Selection</th>
+                  <th>Line</th>
+                  <th>Odds</th>
+                  <th>Updated</th>
+                </tr>
+              </thead>
+              <tbody>
+                {oddsRows.slice(0, 200).map((row, i) => (
+                  <tr key={`${row.event_id}-${row.sportsbook}-${row.market}-${row.selection}-${i}`}>
+                    <td>{row.away_team} @ {row.home_team}</td>
+                    <td>{row.sportsbook}</td>
+                    <td>{row.market}</td>
+                    <td>{row.selection}</td>
+                    <td className="mono">{row.line ?? '—'}</td>
+                    <td className="mono">{formatOdds(row.american_odds)}</td>
+                    <td style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>{formatDate(row.last_update)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {oddsRows.length > 200 && (
+            <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: 8 }}>Showing first 200 of {oddsRows.length} rows</p>
+          )}
+        </section>
+      )}
 
       <div className="grid-2">
         <section className="card">
@@ -157,16 +304,8 @@ export default function App() {
             Drop a CSV file here or click to browse
           </label>
           <p style={{ marginTop: 12, fontSize: '0.8rem', color: 'var(--text-muted)' }}>
-            Required columns: sport, league, start_time, home_team, away_team, sportsbook, market, selection, american_odds
+            Manual upload alternative when you don&apos;t use the API
           </p>
-          {settings?.odds_api_configured && (
-            <div className="actions">
-              <button className="btn-outline" onClick={handleApiRefresh} disabled={loading}>
-                Refresh from Odds API (NBA)
-              </button>
-            </div>
-          )}
-          {message && <div className={`message ${messageType}`}>{message}</div>}
         </section>
 
         <section className="card">
@@ -193,7 +332,7 @@ export default function App() {
       </div>
 
       <section className="card" style={{ marginBottom: 20 }}>
-        <h2>Filters</h2>
+        <h2>EV Filters</h2>
         <div className="form-grid">
           <label>
             Min EV (%)
@@ -265,7 +404,7 @@ export default function App() {
         {results.length === 0 ? (
           <div className="empty-state">
             <h3>No +EV bets found</h3>
-            <p>Upload a CSV with odds from multiple Ontario sportsbooks, then scan.</p>
+            <p>Fetch odds from The Odds API or upload a CSV, then scan.</p>
           </div>
         ) : (
           <div className="table-wrap">
@@ -313,8 +452,8 @@ export default function App() {
       <footer className="disclaimer">
         <strong>Disclaimer:</strong> This tool is for informational and educational purposes only.
         It does not place bets, store sportsbook passwords, or bypass any security measures.
-        Always verify odds directly on the sportsbook before wagering. Gamble responsibly.
-        Ontario sportsbooks: theScore Bet, FanDuel Ontario, DraftKings Ontario, Bet365 Ontario, BetMGM Ontario, Caesars Ontario.
+        Odds come from The Odds API (licensed provider), not scraped sportsbook sites.
+        Always verify odds directly on the sportsbook before wagering. Gamble responsibly. 19+ in Ontario.
       </footer>
     </div>
   )

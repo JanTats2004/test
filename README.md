@@ -35,7 +35,7 @@ A Windows desktop-ready application that compares odds across Ontario sportsbook
 | Flat & fractional Kelly staking | Done |
 | CSV export | Done |
 | Sport/book/market/odds filters | Done |
-| The Odds API integration | Stage 2 (scaffolded) |
+| The Odds API integration | Stage 2 (done) |
 | Real-time refresh | Stage 3 (planned) |
 | Alerts | Stage 4 (planned) |
 | Browser-assisted viewing (Playwright) | Stage 5 (planned) |
@@ -61,31 +61,116 @@ Fair probability is estimated by averaging implied probabilities across books, t
 
 ### Prerequisites
 
-- Python 3.11+
-- Node.js 18+ (for building the frontend)
+- **Python 3.11+** — [python.org/downloads](https://www.python.org/downloads/) (check "Add Python to PATH" during install)
+- **Node.js 18+** — only needed for the React UI (`scripts\run.bat`); not needed for Streamlit (`scripts\run_streamlit.bat`)
 
-### Run
+---
 
-Double-click or run from Command Prompt:
+## Connect The Odds API (Step by Step)
+
+### 1. Create an account and get your API key
+
+1. Go to **[https://the-odds-api.com/](https://the-odds-api.com/)**
+2. Click **Get Started** or **Sign Up**
+3. Create a free account (free tier includes 500 requests/month)
+4. After login, open your **Dashboard** or **API Keys** page
+5. Copy your API key (a long string like `a1b2c3d4e5f6...`)
+
+This is a **licensed odds data provider**. The app uses their official API — it does **not** scrape sportsbook websites.
+
+### 2. Store your API key safely in `.env`
+
+Your key must **never** be committed to git or hardcoded in Python files.
+
+```bat
+cd backend
+copy .env.example .env
+notepad .env
+```
+
+Set exactly one line (replace with your real key):
+
+```
+ODDS_API_KEY=your_api_key_here
+```
+
+**Safety rules:**
+- `.env` is listed in `.gitignore` — it stays on your PC only
+- Do not share `.env` or paste your key in chat/issues
+- Use `backend/.env.example` as the template (no real key inside)
+
+### 3. Install dependencies
+
+```bat
+cd backend
+python -m venv venv
+venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+`python-dotenv` is included — it loads `ODDS_API_KEY` from `.env` automatically.
+
+### 4. Run the app and fetch odds
+
+**Option A — Streamlit (easiest for beginners, Python only):**
+
+```bat
+scripts\run_streamlit.bat
+```
+
+Open **http://localhost:8501**, then:
+1. Choose a **Sport**
+2. Choose a **Region** (`us`, `us2`, `uk`, `eu`, `au`)
+3. Select **Markets** (Moneyline, Spread, Totals)
+4. Click **Fetch odds from The Odds API**
+5. Review the odds table
+6. Click **Calculate +EV bets**
+
+**Option B — Full React UI:**
 
 ```bat
 scripts\run.bat
 ```
 
-Or in PowerShell:
+Open **http://localhost:8000**, use the **Fetch Live Odds** section the same way.
 
-```powershell
-.\scripts\run.ps1
+### 5. What the API client does
+
+File: `backend/app/services/odds_api_client.py`
+
+- Loads `ODDS_API_KEY` from `backend/.env` via `python-dotenv`
+- Calls `https://api.the-odds-api.com/v4`
+- Returns **American odds** format
+- Supports regions: `us`, `us2`, `uk`, `eu`, `au`
+- Pulls **moneyline**, **spread**, and **totals**
+- Attaches **timestamps** (`last_update`, `fetched_at`)
+- Handles errors (invalid key, rate limits, network failures)
+
+---
+
+## Run on Windows (both options)
+
+### Option A: Streamlit UI (recommended for beginners)
+
+```bat
+scripts\run_streamlit.bat
 ```
 
-Open **http://localhost:8000** in your browser.
+Browser: **http://localhost:8501**
 
-### First Use
+### Option B: React + FastAPI UI
+
+```bat
+scripts\run.bat
+```
+
+Browser: **http://localhost:8000**
+
+### First use without API key (CSV only)
 
 1. Click **Upload Odds (CSV)** and select `samples/sample_odds.csv`
-2. Set your **Min EV** threshold (default +2%)
+2. Set **Min EV** (default +2%)
 3. Click **Scan for +EV Bets**
-4. Review results and **Export CSV** if needed
 
 ## Development Setup
 
@@ -138,43 +223,37 @@ Optional columns: `line`, `decimal_odds`, `timestamp`, `event_id`
 
 See `samples/sample_odds.csv` for a working example.
 
-## Stage 2: Odds API
+## Stage 2: Odds API (implemented)
 
-For automated odds pulls, sign up at [The Odds API](https://the-odds-api.com/) and set your key in `backend/.env`:
+The Odds API client lives at `backend/app/services/odds_api_client.py`.
 
-```bat
-cd backend
-copy .env.example .env
+Example usage in Python:
+
+```python
+from app.services.odds_api_client import OddsAPIClient
+
+client = OddsAPIClient()
+sports = client.fetch_sports()
+result = client.fetch_odds(
+    sport_key="basketball_nba",
+    regions="us",
+    markets=["moneyline", "spread", "totals"],
+    odds_format="american",
+)
+print(result["row_count"], "odds lines")
 ```
 
-Then edit `backend/.env` and set:
-
-```
-ODDS_API_KEY=your_key_here
-```
-
-Note: `.env` is gitignored (your key stays local). Use `backend/.env.example` as the template — that file is committed to the repo.
-
-Then use the **Refresh from Odds API** button in the UI, or call:
-
-```
-POST /api/odds-api/refresh/basketball_nba
-```
-
-This uses a licensed data provider — no scraping of sportsbook sites.
-
-## API Endpoints
+### API endpoints
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/health` | Health check |
-| GET | `/api/settings` | App configuration |
-| POST | `/api/import/csv` | Upload odds CSV |
-| GET | `/api/ev/scan` | Scan for +EV bets |
-| GET | `/api/ev/export` | Export results as CSV |
-| GET | `/api/events` | List events |
-| GET | `/api/odds` | List odds |
-| POST | `/api/odds-api/refresh/{sport}` | Pull from Odds API |
+| GET | `/api/odds-api/sports` | List available sports |
+| GET | `/api/odds-api/regions` | List supported regions |
+| POST | `/api/odds-api/fetch` | Fetch odds and save to DB |
+| GET | `/api/odds-api/preview` | Fetch odds for table preview |
+| POST | `/api/odds-api/refresh/{sport}` | Fetch odds (legacy) |
+
+This uses a licensed data provider — **no scraping** of sportsbook sites.
 
 ## Data Model
 
@@ -187,20 +266,24 @@ This uses a licensed data provider — no scraping of sportsbook sites.
 ## Architecture
 
 ```
-backend/          FastAPI + SQLite
+backend/
+  app.py                          Streamlit UI (run: streamlit run app.py)
   app/
-    models.py     SQLAlchemy models
-    services/     EV engine, vig removal, normalization, CSV import
-    routers/      API routes
-frontend/         React + Vite UI
-samples/          Sample CSV data
-scripts/          Windows/Linux launchers
+    services/
+      odds_api_client.py          The Odds API client (dotenv, regions, errors)
+      odds_api.py                 Ingest API data into SQLite
+      ev_engine.py                EV calculation
+frontend/                         React + Vite UI
+samples/                          Sample CSV data
+scripts/
+  run.bat                         Windows: React + FastAPI
+  run_streamlit.bat               Windows: Streamlit only (beginner)
 ```
 
 ## Roadmap
 
-- **Stage 1** — Manual CSV upload (current)
-- **Stage 2** — The Odds API integration
+- **Stage 1** — Manual CSV upload ✅
+- **Stage 2** — The Odds API integration ✅
 - **Stage 3** — Scheduled real-time refresh
 - **Stage 4** — Desktop alerts for +EV opportunities
 - **Stage 5** — Optional Playwright browser display (view only, no auto-betting)
