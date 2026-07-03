@@ -36,19 +36,22 @@ if not exist "backend\.env" (
     )
 )
 
-REM Build frontend if needed
-if not exist "frontend\dist" (
+REM Build frontend (ensures localhost:8000 has latest Odds API UI)
+if exist "frontend\package.json" (
     echo Building frontend...
     cd frontend
-    call npm install
+    call npm install --silent 2>nul
     call npm run build
     cd ..
 )
 
 echo.
+cd backend
+python -c "from app.config import settings; ok=bool(settings.odds_api_key and settings.odds_api_key!='your_api_key_here'); print('Odds API key:', 'CONFIGURED' if ok else 'NOT SET - edit backend\\.env')" 2>nul
+echo.
 echo Starting server at http://localhost:8000
+echo After adding/changing .env, restart this script (Ctrl+C then run again).
 echo Press Ctrl+C to stop.
 echo.
 
-cd backend
-python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
