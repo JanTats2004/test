@@ -28,6 +28,14 @@ call backend\venv\Scripts\activate.bat
 pip install -q -r backend\requirements.txt
 pip install -q pytest
 
+REM Create backend\.env from template if missing
+if not exist "backend\.env" (
+    if exist "backend\.env.example" (
+        copy backend\.env.example backend\.env >nul
+        echo Created backend\.env from .env.example
+    )
+)
+
 REM Build frontend if needed
 if not exist "frontend\dist" (
     echo Building frontend...

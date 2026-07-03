@@ -19,6 +19,11 @@ if (-not (Test-Path "backend\venv")) {
 & "backend\venv\Scripts\Activate.ps1"
 pip install -q -r backend\requirements.txt
 
+if (-not (Test-Path "backend\.env") -and (Test-Path "backend\.env.example")) {
+    Copy-Item "backend\.env.example" "backend\.env"
+    Write-Host "Created backend\.env from .env.example"
+}
+
 # Frontend build
 if (-not (Test-Path "frontend\dist")) {
     Write-Host "Building frontend..."

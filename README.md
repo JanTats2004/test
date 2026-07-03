@@ -140,12 +140,20 @@ See `samples/sample_odds.csv` for a working example.
 
 ## Stage 2: Odds API
 
-For automated odds pulls, sign up at [The Odds API](https://the-odds-api.com/) and set your key:
+For automated odds pulls, sign up at [The Odds API](https://the-odds-api.com/) and set your key in `backend/.env`:
 
-```bash
-cp .env.example backend/.env
-# Edit backend/.env and set ODDS_API_KEY=your_key
+```bat
+cd backend
+copy .env.example .env
 ```
+
+Then edit `backend/.env` and set:
+
+```
+ODDS_API_KEY=your_key_here
+```
+
+Note: `.env` is gitignored (your key stays local). Use `backend/.env.example` as the template — that file is committed to the repo.
 
 Then use the **Refresh from Odds API** button in the UI, or call:
 
